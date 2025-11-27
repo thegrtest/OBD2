@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt
 try:
     import obd
 except ImportError:
-    print("The 'python-OBD' package is not installed. Run: pip install python-OBD")
+    print("The 'obd' (python-OBD) package is not installed. Run: pip install obd")
     sys.exit(1)
 
 try:
@@ -29,7 +29,7 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         super().__init__()
 
         self.setWindowTitle("OBD-II Interface - 2015 Camaro")
-        self.resize(1200, 750)
+        self.resize(1300, 800)
 
         # Dark theme
         self._setup_dark_theme()
@@ -53,14 +53,42 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         # Data history for plotting: {label: {"t": [], "v": []}}
         self.data_history = {}
 
-        # PIDs
+        # Expose a broad set of PIDs – unsupported ones will just return N/A
         self.available_commands = {
-            "Engine RPM":       obd.commands.RPM,
-            "Vehicle Speed":    obd.commands.SPEED,
-            "Coolant Temp":     obd.commands.COOLANT_TEMP,
-            "Throttle Position":obd.commands.THROTTLE_POS,
-            "Engine Load":      obd.commands.ENGINE_LOAD,
-            "Fuel Level":       obd.commands.FUEL_LEVEL,
+            # Core driving data
+            "Engine RPM":                obd.commands.RPM,
+            "Vehicle Speed":             obd.commands.SPEED,
+            "Coolant Temp":              obd.commands.COOLANT_TEMP,
+            "Engine Load":               obd.commands.ENGINE_LOAD,
+            "Throttle Position":         obd.commands.THROTTLE_POS,
+            "Fuel Level":                obd.commands.FUEL_LEVEL,
+            "Run Time":                  obd.commands.RUN_TIME,
+
+            # Fuel trims / mixture
+            "Short Fuel Trim Bank 1":    obd.commands.SHORT_FUEL_TRIM_1,
+            "Long Fuel Trim Bank 1":     obd.commands.LONG_FUEL_TRIM_1,
+            "Short Fuel Trim Bank 2":    obd.commands.SHORT_FUEL_TRIM_2,
+            "Long Fuel Trim Bank 2":     obd.commands.LONG_FUEL_TRIM_2,
+
+            # Airflow / manifold / timing
+            "Intake Manifold Pressure":  obd.commands.INTAKE_PRESSURE,
+            "Intake Air Temp":           obd.commands.INTAKE_TEMP,
+            "MAF":                       obd.commands.MAF,
+            "Timing Advance":            obd.commands.TIMING_ADVANCE,
+            "Barometric Pressure":       obd.commands.BAROMETRIC_PRESSURE,
+
+            # O2/ Lambda basic voltages
+            "O2 B1S1 Voltage":           obd.commands.O2_B1S1,
+            "O2 B1S2 Voltage":           obd.commands.O2_B1S2,
+            "O2 B2S1 Voltage":           obd.commands.O2_B2S1,
+            "O2 B2S2 Voltage":           obd.commands.O2_B2S2,
+
+            # Misc
+            "Distance w/ MIL On":        obd.commands.DISTANCE_W_MIL,
+            "Distance Since DTC Clear":  obd.commands.DISTANCE_SINCE_DTC_CLEAR,
+            "Control Module Voltage":    obd.commands.CONTROL_MODULE_VOLTAGE,
+            "Oil Temp":                  obd.commands.OIL_TEMP,
+            "Fuel Type":                 obd.commands.FUEL_TYPE,
         }
 
         self._build_ui()
@@ -120,7 +148,7 @@ class OBDMainWindow(QtWidgets.QMainWindow):
 
         conn_layout.addWidget(QtWidgets.QLabel("Serial Port:"))
         self.port_combo = QtWidgets.QComboBox()
-        self.port_combo.setMinimumWidth(150)
+        self.port_combo.setMinimumWidth(160)
         conn_layout.addWidget(self.port_combo)
 
         self.refresh_btn = QtWidgets.QPushButton("Refresh")
@@ -146,19 +174,24 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         main_layout.addWidget(live_group)
         live_layout = QtWidgets.QVBoxLayout(live_group)
 
-        # PID checkboxes
-        pid_layout = QtWidgets.QHBoxLayout()
-        live_layout.addLayout(pid_layout)
+        # PID checkboxes (multi-row if many)
+        pid_grid = QtWidgets.QGridLayout()
+        live_layout.addLayout(pid_grid)
 
         self.pid_checkboxes = {}
+        row, col = 0, 0
         for label in self.available_commands.keys():
             cb = QtWidgets.QCheckBox(label)
-            if label in ("Engine RPM", "Vehicle Speed", "Coolant Temp"):
+            # Default a few high-value PIDs on
+            if label in ("Engine RPM", "Vehicle Speed", "Coolant Temp",
+                         "Engine Load", "Throttle Position"):
                 cb.setChecked(True)
             self.pid_checkboxes[label] = cb
-            pid_layout.addWidget(cb)
-
-        pid_layout.addStretch()
+            pid_grid.addWidget(cb, row, col)
+            col += 1
+            if col >= 4:  # 4 columns
+                col = 0
+                row += 1
 
         # Controls row
         controls_layout = QtWidgets.QHBoxLayout()
@@ -175,7 +208,7 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         controls_layout.addWidget(self.stop_btn)
 
         controls_layout.addSpacing(20)
-        controls_layout.addWidget(QtWidgets.QLabel("Interval (s):"))
+        controls_layout.addWidget(QtWidgets.QLabel("Read interval (s):"))
 
         self.interval_spin = QtWidgets.QDoubleSpinBox()
         self.interval_spin.setRange(0.1, 10.0)
@@ -240,6 +273,17 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         self.graph_combo = QtWidgets.QComboBox()
         self.graph_combo.currentIndexChanged.connect(self.refresh_plot)
         top_graph_bar.addWidget(self.graph_combo)
+
+        top_graph_bar.addSpacing(20)
+        top_graph_bar.addWidget(QtWidgets.QLabel("Graph window (s, 0 = all):"))
+
+        self.graph_window_spin = QtWidgets.QDoubleSpinBox()
+        self.graph_window_spin.setRange(0.0, 3600.0)
+        self.graph_window_spin.setSingleStep(5.0)
+        self.graph_window_spin.setValue(0.0)  # default = full session
+        self.graph_window_spin.valueChanged.connect(self.refresh_plot)
+        top_graph_bar.addWidget(self.graph_window_spin)
+
         top_graph_bar.addStretch()
 
         # Matplotlib figure
@@ -298,7 +342,7 @@ class OBDMainWindow(QtWidgets.QMainWindow):
             self.session_start_time = sample["timestamp"]
         t_rel = sample["timestamp"] - self.session_start_time
 
-        # Update history
+        # Update history (store full session)
         for label, val in sample.items():
             if label == "timestamp":
                 continue
@@ -396,7 +440,6 @@ class OBDMainWindow(QtWidgets.QMainWindow):
             self._close_csv()
             self.csv_label.setText("Log file: (none)")
         else:
-            # Will open a new CSV on next Start
             self.csv_label.setText("Log file: (auto)")
 
     def start_polling(self):
@@ -467,7 +510,6 @@ class OBDMainWindow(QtWidgets.QMainWindow):
                 try:
                     resp = self.connection.query(cmd)
                     if resp.is_null():
-                        val = None
                         sample[label] = None
                         line_parts.append(f"{label}=N/A")
                     else:
@@ -479,10 +521,12 @@ class OBDMainWindow(QtWidgets.QMainWindow):
                             else:
                                 num = float(v)
                         except Exception:
+                            # Non-numeric (e.g. Fuel Type string) – store None for plotting, log raw
                             num = None
                         sample[label] = num
                         line_parts.append(f"{label}={v}")
                 except Exception as e:
+                    # Completely swallow per-PID errors, log, keep going
                     self.log(f"Error querying {label}: {e}")
                     sample[label] = None
 
@@ -577,12 +621,29 @@ class OBDMainWindow(QtWidgets.QMainWindow):
             self.canvas.draw_idle()
             return
 
-        t = self.data_history[label]["t"]
-        v = self.data_history[label]["v"]
+        t_all = self.data_history[label]["t"]
+        v_all = self.data_history[label]["v"]
+        if not t_all or not v_all:
+            self.canvas.draw_idle()
+            return
+
+        window_sec = float(self.graph_window_spin.value())
+        if window_sec > 0:
+            t_last = t_all[-1]
+            t0 = t_last - window_sec
+            filtered = [(t, v) for t, v in zip(t_all, v_all) if t >= t0]
+            if filtered:
+                t, v = zip(*filtered)
+            else:
+                t, v = [], []
+        else:
+            t, v = t_all, v_all
 
         self.ax.set_ylabel(label, color="#e8eaed")
+
         if t and v:
             self.ax.plot(t, v, linewidth=1.5, color="#1a73e8")
+
         self.canvas.draw_idle()
 
     # ------------------------------------------------------------------
