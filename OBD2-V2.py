@@ -625,6 +625,9 @@ class OBDMainWindow(QtWidgets.QMainWindow):
     def connect_obd(self):
         if self.connection and self.connection.is_connected():
             self.log("Already connected.")
+            self._apply_connected_state()
+            vehicle_info = self._fetch_vehicle_details()
+            self.vehicle_info_label.setText(vehicle_info)
             return
 
         port = self.port_combo.currentText()
@@ -673,16 +676,10 @@ class OBDMainWindow(QtWidgets.QMainWindow):
             return
 
         self.log("Connected to ECU.")
-        self.status_label.setText(f"Connected ({port})")
-
+        self._apply_connected_state(port)
         vehicle_info = self._fetch_vehicle_details()
         self.vehicle_info_label.setText(vehicle_info)
 
-        self.connect_btn.setEnabled(False)
-        self.disconnect_btn.setEnabled(True)
-        self.start_btn.setEnabled(True)
-        self.read_dtc_btn.setEnabled(True)
-        self.clear_dtc_btn.setEnabled(True)
 
     def disconnect_obd(self):
         self.stop_polling()
@@ -701,6 +698,20 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         self.start_btn.setEnabled(False)
         self.read_dtc_btn.setEnabled(False)
         self.clear_dtc_btn.setEnabled(False)
+
+    def _apply_connected_state(self, port: str | None = None):
+        """Ensure all UI controls reflect an active connection."""
+        if port:
+            port_label = port
+        else:
+            port_label = getattr(self.connection, "port_name", None) or self.port_combo.currentText() or "Connected"
+
+        self.status_label.setText(f"Connected ({port_label})")
+        self.connect_btn.setEnabled(False)
+        self.disconnect_btn.setEnabled(True)
+        self.start_btn.setEnabled(True)
+        self.read_dtc_btn.setEnabled(True)
+        self.clear_dtc_btn.setEnabled(True)
 
     # ------------------------------------------------------------------
     # Polling & CSV
