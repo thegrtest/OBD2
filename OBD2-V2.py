@@ -25,6 +25,50 @@ except ImportError:
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
+class GraphWindow(QtWidgets.QMainWindow):
+    """Detached graph window that mirrors selections from the main UI."""
+
+    def __init__(self, main_window: "OBDMainWindow"):
+        super().__init__(main_window)
+        self.main_window = main_window
+
+        self.setWindowTitle("Live Graphs (Detached)")
+        self.resize(900, 700)
+
+        central = QtWidgets.QWidget()
+        self.setCentralWidget(central)
+
+        layout = QtWidgets.QVBoxLayout(central)
+
+        controls = QtWidgets.QHBoxLayout()
+        layout.addLayout(controls)
+
+        controls.addWidget(QtWidgets.QLabel("Scale:"))
+        self.scale_spin = QtWidgets.QDoubleSpinBox()
+        self.scale_spin.setRange(0.5, 5.0)
+        self.scale_spin.setSingleStep(0.1)
+        self.scale_spin.setValue(1.0)
+        controls.addWidget(self.scale_spin)
+        controls.addStretch()
+
+        fig, axes, canvas = self.main_window._create_figure()
+        self.graph_view = {"fig": fig, "axes": axes, "canvas": canvas}
+        self.base_width, self.base_height = fig.get_size_inches()
+
+        layout.addWidget(canvas)
+
+        self.scale_spin.valueChanged.connect(self._on_scale_changed)
+
+    def _on_scale_changed(self, value: float):
+        fig = self.graph_view["fig"]
+        canvas = self.graph_view["canvas"]
+        fig.set_size_inches(self.base_width * value, self.base_height * value, forward=True)
+        canvas.draw_idle()
+
+    def closeEvent(self, event: QtGui.QCloseEvent):
+        self.main_window._on_popup_closed(self.graph_view)
+        super().closeEvent(event)
+
 
 class OBDMainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -414,16 +458,18 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         for lst in self.graph_lists:
             lst.itemChanged.connect(self.refresh_plot)
 
-        # Matplotlib figure with 3 axes
-        self.fig = Figure(figsize=(5, 6), dpi=100)
-        self.ax1 = self.fig.add_subplot(311)
-        self.ax2 = self.fig.add_subplot(312, sharex=self.ax1)
-        self.ax3 = self.fig.add_subplot(313, sharex=self.ax1)
-        self.axes = [self.ax1, self.ax2, self.ax3]
-        self._style_all_axes()
+        # Detached graph window support
+        self.popup_window = None
+        self.popout_btn = QtWidgets.QPushButton("Open Graph Window")
+        self.popout_btn.clicked.connect(self._toggle_graph_window)
+        top_graph_bar.addSpacing(12)
+        top_graph_bar.addWidget(self.popout_btn)
 
-        self.canvas = FigureCanvas(self.fig)
-        graph_layout.addWidget(self.canvas)
+        # Matplotlib figure with 3 axes
+        self.graph_views = []
+        fig, axes, canvas = self._create_figure()
+        self.graph_views.append({"fig": fig, "axes": axes, "canvas": canvas})
+        graph_layout.addWidget(canvas)
 
         splitter.addWidget(graph_group)
         splitter.setStretchFactor(0, 1)
@@ -432,10 +478,28 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         # Initial port scan
         self.refresh_ports()
 
+    def _toggle_graph_window(self):
+        if self.popup_window and not self.popup_window.isHidden():
+            self.popup_window.close()
+            return
+
+        self.popup_window = GraphWindow(self)
+        self.graph_views.append(self.popup_window.graph_view)
+        self.popout_btn.setText("Close Graph Window")
+        self.popup_window.show()
+        self.refresh_plot()
+
+    def _on_popup_closed(self, view):
+        if view in self.graph_views:
+            self.graph_views.remove(view)
+        self.popup_window = None
+        self.popout_btn.setText("Open Graph Window")
+
     def _style_axis(self, ax, xlabel=False, ylabel=""):
         ax.cla()
         ax.set_facecolor("#202124")
-        self.fig.patch.set_facecolor("#202124")
+        if ax.figure:
+            ax.figure.patch.set_facecolor("#202124")
         ax.tick_params(colors="#e8eaed", labelsize=9)
         ax.grid(True, color="#3c4043", linestyle="--", linewidth=0.7, alpha=0.7)
         for spine in ax.spines.values():
@@ -447,10 +511,20 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         else:
             ax.set_ylabel("", color="#e8eaed")
 
-    def _style_all_axes(self):
+    def _style_all_axes(self, axes):
         # Only bottom axis gets the X label
-        for i, ax in enumerate(self.axes):
-            self._style_axis(ax, xlabel=(i == len(self.axes) - 1))
+        for i, ax in enumerate(axes):
+            self._style_axis(ax, xlabel=(i == len(axes) - 1))
+
+    def _create_figure(self):
+        fig = Figure(figsize=(5, 6), dpi=100)
+        ax1 = fig.add_subplot(311)
+        ax2 = fig.add_subplot(312, sharex=ax1)
+        ax3 = fig.add_subplot(313, sharex=ax1)
+        axes = [ax1, ax2, ax3]
+        self._style_all_axes(axes)
+        canvas = FigureCanvas(fig)
+        return fig, axes, canvas
 
     def _populate_graph_lists(self, labels):
         for lst in self.graph_lists:
@@ -852,67 +926,70 @@ class OBDMainWindow(QtWidgets.QMainWindow):
     # Plotting (three panes)
     # ------------------------------------------------------------------
     def refresh_plot(self):
-        # Re-style all axes, but only bottom shows x-label
-        for i, ax in enumerate(self.axes):
-            self._style_axis(ax, xlabel=(i == len(self.axes) - 1))
-
         window_sec = float(self.graph_window_spin.value())
 
-        for ax, lst in zip(self.axes, self.graph_lists):
-            labels = self._checked_labels(lst)
-            if not labels:
-                continue
+        for view in self.graph_views:
+            axes = view["axes"]
+            canvas = view["canvas"]
 
-            color_cycle = cycle(self.plot_colors)
-            any_plotted = False
+            # Re-style all axes, but only bottom shows x-label
+            self._style_all_axes(axes)
 
-            for label in labels:
-                if label not in self.data_history:
-                    continue
-                t_all = self.data_history[label]["t"]
-                v_all = self.data_history[label]["v"]
-                if not t_all or not v_all:
+            for ax, lst in zip(axes, self.graph_lists):
+                labels = self._checked_labels(lst)
+                if not labels:
                     continue
 
-                if window_sec > 0:
-                    t_last = t_all[-1]
-                    t0 = t_last - window_sec
-                    filtered = [(t, v) for t, v in zip(t_all, v_all) if t >= t0]
-                    if filtered:
-                        t, v = zip(*filtered)
+                color_cycle = cycle(self.plot_colors)
+                any_plotted = False
+
+                for label in labels:
+                    if label not in self.data_history:
+                        continue
+                    t_all = self.data_history[label]["t"]
+                    v_all = self.data_history[label]["v"]
+                    if not t_all or not v_all:
+                        continue
+
+                    if window_sec > 0:
+                        t_last = t_all[-1]
+                        t0 = t_last - window_sec
+                        filtered = [(t, v) for t, v in zip(t_all, v_all) if t >= t0]
+                        if filtered:
+                            t, v = zip(*filtered)
+                        else:
+                            t, v = [], []
                     else:
-                        t, v = [], []
-                else:
-                    t, v = t_all, v_all
+                        t, v = t_all, v_all
 
-                if t and v:
-                    color = next(color_cycle)
-                    ax.plot(
-                        t,
-                        v,
-                        linewidth=2.0,
-                        label=label,
-                        color=color,
-                        marker="o",
-                        markersize=3,
-                        markerfacecolor="#121314",
-                        markeredgewidth=0.6,
+                    if t and v:
+                        color = next(color_cycle)
+                        ax.plot(
+                            t,
+                            v,
+                            linewidth=2.0,
+                            label=label,
+                            color=color,
+                            marker="o",
+                            markersize=3,
+                            markerfacecolor="#121314",
+                            markeredgewidth=0.6,
+                        )
+                        any_plotted = True
+                        ax.set_ylabel(" / ".join(labels), color="#e8eaed")
+
+                if any_plotted:
+                    legend = ax.legend(
+                        loc="upper left",
+                        fontsize=8,
+                        facecolor="#202124",
+                        edgecolor="#3c4043",
+                        framealpha=0.9,
                     )
-                    any_plotted = True
-                    ax.set_ylabel(" / ".join(labels), color="#e8eaed")
+                    for text in legend.get_texts():
+                        text.set_color("#e8eaed")
 
-            if any_plotted:
-                legend = ax.legend(
-                    loc="upper left",
-                    fontsize=8,
-                    facecolor="#202124",
-                    edgecolor="#3c4043",
-                    framealpha=0.9,
-                )
-                for text in legend.get_texts():
-                    text.set_color("#e8eaed")
-
-        self.canvas.draw_idle()
+            canvas.draw_idle()
 
     def _fetch_vehicle_details(self) -> str:
         if not self.connection or not self.connection.is_connected():
@@ -951,6 +1028,11 @@ class OBDMainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
     def closeEvent(self, event: QtGui.QCloseEvent):
         self.stop_polling()
+        if self.popup_window:
+            try:
+                self.popup_window.close()
+            except Exception:
+                pass
         if self.connection and self.connection.is_connected():
             try:
                 self.connection.close()
