@@ -633,18 +633,43 @@ class OBDMainWindow(QtWidgets.QMainWindow):
             return
 
         self.log(f"Connecting to {port}...")
+        self.connect_btn.setEnabled(False)
+        self.status_label.setText(f"Connecting ({port})…")
+        QtWidgets.QApplication.processEvents()
+
+        # python-OBD can take a moment to finish the initial handshake. To avoid
+        # treating a slow response as a failure (and locking the UI), give the
+        # connection a short grace period while keeping the button disabled.
         try:
             self.connection = obd.OBD(port, fast=False, timeout=2.0)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error", f"Failed to open port {port}:\n{e}")
             self.log(f"Failed to open port {port}: {e}")
             self.connection = None
+            self.connect_btn.setEnabled(True)
+            self.status_label.setText("Disconnected")
             return
 
-        if not self.connection or not self.connection.is_connected():
+        # Wait briefly for the adapter handshake to complete
+        connected = False
+        deadline = time.monotonic() + 6.0
+        while time.monotonic() < deadline:
+            if self.connection and self.connection.is_connected():
+                connected = True
+                break
+            QtWidgets.QApplication.processEvents()
+            time.sleep(0.2)
+
+        if not connected:
             QtWidgets.QMessageBox.critical(self, "Error", f"Could not connect to ECU on {port}.")
             self.log("ECU connection failed.")
+            try:
+                self.connection.close()
+            except Exception:
+                pass
             self.connection = None
+            self.connect_btn.setEnabled(True)
+            self.status_label.setText("Disconnected")
             return
 
         self.log("Connected to ECU.")
