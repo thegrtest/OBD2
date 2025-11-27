@@ -2,6 +2,8 @@ import sys
 import time
 import csv
 import threading
+from datetime import datetime
+from itertools import cycle
 from queue import Queue
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -52,6 +54,15 @@ class OBDMainWindow(QtWidgets.QMainWindow):
 
         # Data history for plotting: {label: {"t": [], "v": []}}
         self.data_history = {}
+        self.plot_colors = [
+            "#1a73e8",
+            "#db4437",
+            "#f4b400",
+            "#0f9d58",
+            "#ab47bc",
+            "#00acc1",
+            "#ff6d01",
+        ]
 
         # Broad set of PIDs – unsupported ones will just show N/A
         self.available_commands = {
@@ -76,6 +87,15 @@ class OBDMainWindow(QtWidgets.QMainWindow):
             "MAF":                       obd.commands.MAF,
             "Timing Advance":            obd.commands.TIMING_ADVANCE,
             "Barometric Pressure":       obd.commands.BAROMETRIC_PRESSURE,
+            "Absolute Load":             obd.commands.ABSOLUTE_LOAD,
+            "Relative Throttle":         obd.commands.RELATIVE_THROTTLE_POS,
+            "Fuel Pressure":             obd.commands.FUEL_PRESSURE,
+            "Fuel Rate":                 obd.commands.FUEL_RATE,
+            "Ambient Air Temp":          obd.commands.AMBIANT_AIR_TEMP,
+            "Catalyst Temp B1S1":        obd.commands.CATALYST_TEMP_B1S1,
+            "Catalyst Temp B2S1":        obd.commands.CATALYST_TEMP_B2S1,
+            "Commanded EQ Ratio":        obd.commands.COMMANDED_EQUIV_RATIO,
+            "EGR Error":                 obd.commands.EGR_ERROR,
 
             # O2/ Lambda basic voltages
             "O2 B1S1 Voltage":           obd.commands.O2_B1S1,
@@ -224,6 +244,10 @@ class OBDMainWindow(QtWidgets.QMainWindow):
 
         self.csv_label = QtWidgets.QLabel("Log file: (auto)")
         controls_layout.addWidget(self.csv_label)
+
+        self.load_log_btn = QtWidgets.QPushButton("Load Log…")
+        self.load_log_btn.clicked.connect(self.load_log_file)
+        controls_layout.addWidget(self.load_log_btn)
         controls_layout.addStretch()
 
         # --- DTC group ---
@@ -270,18 +294,24 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         graph_layout.addLayout(top_graph_bar)
 
         top_graph_bar.addWidget(QtWidgets.QLabel("Graph 1:"))
-        self.graph_combo1 = QtWidgets.QComboBox()
-        top_graph_bar.addWidget(self.graph_combo1)
+        self.graph_list1 = QtWidgets.QListWidget()
+        self.graph_list1.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
+        self.graph_list1.setMaximumHeight(120)
+        top_graph_bar.addWidget(self.graph_list1)
 
         top_graph_bar.addSpacing(20)
         top_graph_bar.addWidget(QtWidgets.QLabel("Graph 2:"))
-        self.graph_combo2 = QtWidgets.QComboBox()
-        top_graph_bar.addWidget(self.graph_combo2)
+        self.graph_list2 = QtWidgets.QListWidget()
+        self.graph_list2.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
+        self.graph_list2.setMaximumHeight(120)
+        top_graph_bar.addWidget(self.graph_list2)
 
         top_graph_bar.addSpacing(20)
         top_graph_bar.addWidget(QtWidgets.QLabel("Graph 3:"))
-        self.graph_combo3 = QtWidgets.QComboBox()
-        top_graph_bar.addWidget(self.graph_combo3)
+        self.graph_list3 = QtWidgets.QListWidget()
+        self.graph_list3.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
+        self.graph_list3.setMaximumHeight(120)
+        top_graph_bar.addWidget(self.graph_list3)
 
         top_graph_bar.addSpacing(20)
         top_graph_bar.addWidget(QtWidgets.QLabel("Graph window (s, 0 = all):"))
@@ -294,12 +324,12 @@ class OBDMainWindow(QtWidgets.QMainWindow):
 
         top_graph_bar.addStretch()
 
-        # Graph combos list for convenience
-        self.graph_combos = [self.graph_combo1, self.graph_combo2, self.graph_combo3]
-        for combo in self.graph_combos:
-            combo.currentIndexChanged.connect(self.refresh_plot)
-
         self.graph_window_spin.valueChanged.connect(self.refresh_plot)
+
+        # Graph widgets list for convenience
+        self.graph_lists = [self.graph_list1, self.graph_list2, self.graph_list3]
+        for lst in self.graph_lists:
+            lst.itemChanged.connect(self.refresh_plot)
 
         # Matplotlib figure with 3 axes
         self.fig = Figure(figsize=(5, 6), dpi=100)
@@ -337,6 +367,33 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         # Only bottom axis gets the X label
         for i, ax in enumerate(self.axes):
             self._style_axis(ax, xlabel=(i == len(self.axes) - 1))
+
+    def _populate_graph_lists(self, labels):
+        for lst in self.graph_lists:
+            lst.blockSignals(True)
+            lst.clear()
+            for label in labels:
+                item = QtWidgets.QListWidgetItem(label)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Unchecked)
+                lst.addItem(item)
+            lst.blockSignals(False)
+
+        # Auto-check the first few labels across panes for convenience
+        for idx, lst in enumerate(self.graph_lists):
+            if idx < len(labels):
+                item = lst.item(idx)
+                if item:
+                    item.setCheckState(Qt.Checked)
+        self.refresh_plot()
+
+    def _checked_labels(self, list_widget: QtWidgets.QListWidget):
+        labels = []
+        for i in range(list_widget.count()):
+            item = list_widget.item(i)
+            if item and item.checkState() == Qt.Checked:
+                labels.append(item.text())
+        return labels
 
     # ------------------------------------------------------------------
     # Logging & queue handling
@@ -502,12 +559,8 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         else:
             self._close_csv()
 
-        # Populate graph combos (first option blank = "(None)")
-        for combo in self.graph_combos:
-            combo.clear()
-            combo.addItem("(None)")
-            combo.addItems(labels)
-            combo.setCurrentIndex(0)
+        # Populate graph lists so multiple series can be shown per pane
+        self._populate_graph_lists(labels)
 
         self.polling = True
         self.start_btn.setEnabled(False)
@@ -588,6 +641,77 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         self.csv_writer = None
         self.csv_log_labels = []
 
+    def load_log_file(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Open Log CSV",
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+
+        self.stop_polling()
+        self.data_history.clear()
+        self.session_start_time = None
+
+        base_ts = None
+        row_count = 0
+        labels = []
+
+        try:
+            with open(path, newline="") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                if not header or len(header) < 2:
+                    QtWidgets.QMessageBox.warning(
+                        self, "Warning", "Selected file is not a valid log."
+                    )
+                    return
+
+                labels = header[1:]
+                for label in labels:
+                    self.data_history[label] = {"t": [], "v": []}
+
+                for row in reader:
+                    if len(row) < 1:
+                        continue
+                    try:
+                        ts = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").timestamp()
+                    except Exception:
+                        continue
+
+                    if base_ts is None:
+                        base_ts = ts
+                    t_rel = ts - base_ts
+
+                    for label, value in zip(labels, row[1:]):
+                        if value == "":
+                            continue
+                        try:
+                            num = float(value)
+                        except Exception:
+                            continue
+                        self.data_history[label]["t"].append(t_rel)
+                        self.data_history[label]["v"].append(num)
+
+                    row_count += 1
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self, "Error", f"Failed to read log file:\n{e}"
+            )
+            self.log(f"Failed to read log file {path}: {e}")
+            return
+
+        if row_count == 0 or base_ts is None:
+            QtWidgets.QMessageBox.information(self, "Info", "No data found in log file.")
+            return
+
+        self.session_start_time = base_ts
+        self._populate_graph_lists(labels)
+        self.csv_label.setText(f"Log file: {QtCore.QFileInfo(path).fileName()}")
+        self.log(f"Loaded log from {path} ({row_count} rows)")
+
     # ------------------------------------------------------------------
     # DTCs
     # ------------------------------------------------------------------
@@ -646,30 +770,41 @@ class OBDMainWindow(QtWidgets.QMainWindow):
 
         window_sec = float(self.graph_window_spin.value())
 
-        for ax, combo in zip(self.axes, self.graph_combos):
-            label = combo.currentText()
-            if not label or label == "(None)" or label not in self.data_history:
+        for ax, lst in zip(self.axes, self.graph_lists):
+            labels = self._checked_labels(lst)
+            if not labels:
                 continue
 
-            t_all = self.data_history[label]["t"]
-            v_all = self.data_history[label]["v"]
-            if not t_all or not v_all:
-                continue
+            color_cycle = cycle(self.plot_colors)
+            any_plotted = False
 
-            if window_sec > 0:
-                t_last = t_all[-1]
-                t0 = t_last - window_sec
-                filtered = [(t, v) for t, v in zip(t_all, v_all) if t >= t0]
-                if filtered:
-                    t, v = zip(*filtered)
+            for label in labels:
+                if label not in self.data_history:
+                    continue
+                t_all = self.data_history[label]["t"]
+                v_all = self.data_history[label]["v"]
+                if not t_all or not v_all:
+                    continue
+
+                if window_sec > 0:
+                    t_last = t_all[-1]
+                    t0 = t_last - window_sec
+                    filtered = [(t, v) for t, v in zip(t_all, v_all) if t >= t0]
+                    if filtered:
+                        t, v = zip(*filtered)
+                    else:
+                        t, v = [], []
                 else:
-                    t, v = [], []
-            else:
-                t, v = t_all, v_all
+                    t, v = t_all, v_all
 
-            if t and v:
-                ax.set_ylabel(label, color="#e8eaed")
-                ax.plot(t, v, linewidth=1.5, color="#1a73e8")
+                if t and v:
+                    color = next(color_cycle)
+                    ax.plot(t, v, linewidth=1.5, label=label, color=color)
+                    any_plotted = True
+                    ax.set_ylabel(" / ".join(labels), color="#e8eaed")
+
+            if any_plotted:
+                ax.legend(loc="upper left", fontsize=8, facecolor="#202124")
 
         self.canvas.draw_idle()
 
