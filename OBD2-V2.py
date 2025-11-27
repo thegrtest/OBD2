@@ -53,7 +53,7 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         # Data history for plotting: {label: {"t": [], "v": []}}
         self.data_history = {}
 
-        # Expose a broad set of PIDs – unsupported ones will just return N/A
+        # Broad set of PIDs – unsupported ones will just show N/A
         self.available_commands = {
             # Core driving data
             "Engine RPM":                obd.commands.RPM,
@@ -182,14 +182,13 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         row, col = 0, 0
         for label in self.available_commands.keys():
             cb = QtWidgets.QCheckBox(label)
-            # Default a few high-value PIDs on
             if label in ("Engine RPM", "Vehicle Speed", "Coolant Temp",
                          "Engine Load", "Throttle Position"):
                 cb.setChecked(True)
             self.pid_checkboxes[label] = cb
             pid_grid.addWidget(cb, row, col)
             col += 1
-            if col >= 4:  # 4 columns
+            if col >= 4:
                 col = 0
                 row += 1
 
@@ -244,7 +243,7 @@ class OBDMainWindow(QtWidgets.QMainWindow):
 
         dtc_layout.addStretch()
 
-        # --- Bottom splitter: log + graph ---
+        # --- Bottom splitter: log + graphs ---
         splitter = QtWidgets.QSplitter(Qt.Horizontal)
         main_layout.addWidget(splitter, 1)
 
@@ -262,17 +261,27 @@ class OBDMainWindow(QtWidgets.QMainWindow):
 
         splitter.addWidget(log_group)
 
-        # Right: graph
-        graph_group = QtWidgets.QGroupBox("Live Graph")
+        # Right: multi-graph
+        graph_group = QtWidgets.QGroupBox("Live Graphs")
         graph_layout = QtWidgets.QVBoxLayout(graph_group)
 
+        # Top bar: graph window
         top_graph_bar = QtWidgets.QHBoxLayout()
         graph_layout.addLayout(top_graph_bar)
 
-        top_graph_bar.addWidget(QtWidgets.QLabel("Graph variable:"))
-        self.graph_combo = QtWidgets.QComboBox()
-        self.graph_combo.currentIndexChanged.connect(self.refresh_plot)
-        top_graph_bar.addWidget(self.graph_combo)
+        top_graph_bar.addWidget(QtWidgets.QLabel("Graph 1:"))
+        self.graph_combo1 = QtWidgets.QComboBox()
+        top_graph_bar.addWidget(self.graph_combo1)
+
+        top_graph_bar.addSpacing(20)
+        top_graph_bar.addWidget(QtWidgets.QLabel("Graph 2:"))
+        self.graph_combo2 = QtWidgets.QComboBox()
+        top_graph_bar.addWidget(self.graph_combo2)
+
+        top_graph_bar.addSpacing(20)
+        top_graph_bar.addWidget(QtWidgets.QLabel("Graph 3:"))
+        self.graph_combo3 = QtWidgets.QComboBox()
+        top_graph_bar.addWidget(self.graph_combo3)
 
         top_graph_bar.addSpacing(20)
         top_graph_bar.addWidget(QtWidgets.QLabel("Graph window (s, 0 = all):"))
@@ -280,35 +289,54 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         self.graph_window_spin = QtWidgets.QDoubleSpinBox()
         self.graph_window_spin.setRange(0.0, 3600.0)
         self.graph_window_spin.setSingleStep(5.0)
-        self.graph_window_spin.setValue(0.0)  # default = full session
-        self.graph_window_spin.valueChanged.connect(self.refresh_plot)
+        self.graph_window_spin.setValue(0.0)
         top_graph_bar.addWidget(self.graph_window_spin)
 
         top_graph_bar.addStretch()
 
-        # Matplotlib figure
-        self.fig = Figure(figsize=(5, 4), dpi=100)
-        self.ax = self.fig.add_subplot(111)
-        self._style_axes()
+        # Graph combos list for convenience
+        self.graph_combos = [self.graph_combo1, self.graph_combo2, self.graph_combo3]
+        for combo in self.graph_combos:
+            combo.currentIndexChanged.connect(self.refresh_plot)
+
+        self.graph_window_spin.valueChanged.connect(self.refresh_plot)
+
+        # Matplotlib figure with 3 axes
+        self.fig = Figure(figsize=(5, 6), dpi=100)
+        self.ax1 = self.fig.add_subplot(311)
+        self.ax2 = self.fig.add_subplot(312, sharex=self.ax1)
+        self.ax3 = self.fig.add_subplot(313, sharex=self.ax1)
+        self.axes = [self.ax1, self.ax2, self.ax3]
+        self._style_all_axes()
+
         self.canvas = FigureCanvas(self.fig)
         graph_layout.addWidget(self.canvas)
 
         splitter.addWidget(graph_group)
         splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(1, 2)
 
         # Initial port scan
         self.refresh_ports()
 
-    def _style_axes(self):
-        self.ax.cla()
-        self.ax.set_facecolor("#202124")
+    def _style_axis(self, ax, xlabel=False, ylabel=""):
+        ax.cla()
+        ax.set_facecolor("#202124")
         self.fig.patch.set_facecolor("#202124")
-        self.ax.tick_params(colors="#e8eaed")
-        for spine in self.ax.spines.values():
+        ax.tick_params(colors="#e8eaed")
+        for spine in ax.spines.values():
             spine.set_color("#e8eaed")
-        self.ax.set_xlabel("Time (s)", color="#e8eaed")
-        self.ax.set_ylabel("", color="#e8eaed")
+        if xlabel:
+            ax.set_xlabel("Time (s)", color="#e8eaed")
+        if ylabel:
+            ax.set_ylabel(ylabel, color="#e8eaed")
+        else:
+            ax.set_ylabel("", color="#e8eaed")
+
+    def _style_all_axes(self):
+        # Only bottom axis gets the X label
+        for i, ax in enumerate(self.axes):
+            self._style_axis(ax, xlabel=(i == len(self.axes) - 1))
 
     # ------------------------------------------------------------------
     # Logging & queue handling
@@ -337,12 +365,11 @@ class OBDMainWindow(QtWidgets.QMainWindow):
             pass
 
     def _handle_sample(self, sample: dict):
-        # sample: {"timestamp": float, "label1": val1, ...}
         if self.session_start_time is None:
             self.session_start_time = sample["timestamp"]
         t_rel = sample["timestamp"] - self.session_start_time
 
-        # Update history (store full session)
+        # Store full session
         for label, val in sample.items():
             if label == "timestamp":
                 continue
@@ -352,7 +379,7 @@ class OBDMainWindow(QtWidgets.QMainWindow):
                 self.data_history[label]["t"].append(t_rel)
                 self.data_history[label]["v"].append(val)
 
-        # CSV
+        # CSV write
         if self.csv_writer is not None:
             row = [time.strftime("%Y-%m-%d %H:%M:%S",
                                  time.localtime(sample["timestamp"]))]
@@ -365,7 +392,7 @@ class OBDMainWindow(QtWidgets.QMainWindow):
                 self.log(f"CSV write error: {e}")
                 self._close_csv()
 
-        # Update plot
+        # Update all plots
         self.refresh_plot()
 
     # ------------------------------------------------------------------
@@ -463,23 +490,24 @@ class OBDMainWindow(QtWidgets.QMainWindow):
 
         commands = [self.available_commands[lbl] for lbl in labels]
 
-        # Reset data
+        # Reset in-memory data
         with self.data_queue.mutex:
             self.data_queue.queue.clear()
         self.data_history.clear()
         self.session_start_time = None
 
-        # CSV
+        # CSV setup
         if self.log_to_csv:
             self._open_new_csv(labels)
         else:
             self._close_csv()
 
-        # Graph combo
-        self.graph_combo.clear()
-        self.graph_combo.addItems(labels)
-        if labels:
-            self.graph_combo.setCurrentIndex(0)
+        # Populate graph combos (first option blank = "(None)")
+        for combo in self.graph_combos:
+            combo.clear()
+            combo.addItem("(None)")
+            combo.addItems(labels)
+            combo.setCurrentIndex(0)
 
         self.polling = True
         self.start_btn.setEnabled(False)
@@ -521,12 +549,10 @@ class OBDMainWindow(QtWidgets.QMainWindow):
                             else:
                                 num = float(v)
                         except Exception:
-                            # Non-numeric (e.g. Fuel Type string) – store None for plotting, log raw
                             num = None
                         sample[label] = num
                         line_parts.append(f"{label}={v}")
                 except Exception as e:
-                    # Completely swallow per-PID errors, log, keep going
                     self.log(f"Error querying {label}: {e}")
                     sample[label] = None
 
@@ -611,38 +637,39 @@ class OBDMainWindow(QtWidgets.QMainWindow):
             self.log(f"Error clearing DTCs: {e}")
 
     # ------------------------------------------------------------------
-    # Plotting
+    # Plotting (three panes)
     # ------------------------------------------------------------------
     def refresh_plot(self):
-        label = self.graph_combo.currentText()
-        self._style_axes()
-
-        if not label or label not in self.data_history:
-            self.canvas.draw_idle()
-            return
-
-        t_all = self.data_history[label]["t"]
-        v_all = self.data_history[label]["v"]
-        if not t_all or not v_all:
-            self.canvas.draw_idle()
-            return
+        # Re-style all axes, but only bottom shows x-label
+        for i, ax in enumerate(self.axes):
+            self._style_axis(ax, xlabel=(i == len(self.axes) - 1))
 
         window_sec = float(self.graph_window_spin.value())
-        if window_sec > 0:
-            t_last = t_all[-1]
-            t0 = t_last - window_sec
-            filtered = [(t, v) for t, v in zip(t_all, v_all) if t >= t0]
-            if filtered:
-                t, v = zip(*filtered)
+
+        for ax, combo in zip(self.axes, self.graph_combos):
+            label = combo.currentText()
+            if not label or label == "(None)" or label not in self.data_history:
+                continue
+
+            t_all = self.data_history[label]["t"]
+            v_all = self.data_history[label]["v"]
+            if not t_all or not v_all:
+                continue
+
+            if window_sec > 0:
+                t_last = t_all[-1]
+                t0 = t_last - window_sec
+                filtered = [(t, v) for t, v in zip(t_all, v_all) if t >= t0]
+                if filtered:
+                    t, v = zip(*filtered)
+                else:
+                    t, v = [], []
             else:
-                t, v = [], []
-        else:
-            t, v = t_all, v_all
+                t, v = t_all, v_all
 
-        self.ax.set_ylabel(label, color="#e8eaed")
-
-        if t and v:
-            self.ax.plot(t, v, linewidth=1.5, color="#1a73e8")
+            if t and v:
+                ax.set_ylabel(label, color="#e8eaed")
+                ax.plot(t, v, linewidth=1.5, color="#1a73e8")
 
         self.canvas.draw_idle()
 
