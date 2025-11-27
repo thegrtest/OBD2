@@ -35,6 +35,7 @@ class OBDMainWindow(QtWidgets.QMainWindow):
 
         # Dark theme
         self._setup_dark_theme()
+        self._apply_widget_styling()
 
         # OBD state
         self.connection = None
@@ -150,6 +151,79 @@ class OBDMainWindow(QtWidgets.QMainWindow):
 
         app.setPalette(palette)
 
+    def _apply_widget_styling(self):
+        """Global widget stylesheet for a more refined, consistent look."""
+        app = QtWidgets.QApplication.instance()
+        app.setFont(QtGui.QFont("Inter", 10))
+        app.setStyleSheet(
+            """
+            QMainWindow, QWidget {
+                background-color: #202124;
+                color: #e8eaed;
+            }
+            QGroupBox {
+                border: 1px solid #3c4043;
+                border-radius: 6px;
+                margin-top: 12px;
+                padding: 12px 10px 10px 10px;
+                font-weight: 600;
+                color: #e8eaed;
+            }
+            QGroupBox:title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 6px;
+            }
+            QPushButton {
+                background-color: #2d2f33;
+                border: 1px solid #3c4043;
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                border-color: #5f6368;
+                background-color: #35383c;
+            }
+            QPushButton:pressed {
+                background-color: #1f1f23;
+            }
+            QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit, QListWidget {
+                background-color: #2b2c30;
+                border: 1px solid #3c4043;
+                border-radius: 6px;
+                padding: 4px 6px;
+                selection-background-color: #3b82f6;
+            }
+            QListWidget::item {
+                padding: 4px 6px;
+            }
+            QScrollBar:vertical {
+                background: #1c1c1e;
+                width: 12px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #4a4c50;
+                min-height: 20px;
+                border-radius: 6px;
+            }
+            QLabel#TitleLabel {
+                font-size: 20px;
+                font-weight: 700;
+                padding: 6px 0;
+            }
+            QLabel#VehicleInfoLabel {
+                color: #8ab4f8;
+                font-weight: 600;
+            }
+            QPlainTextEdit {
+                border-radius: 6px;
+                border: 1px solid #3c4043;
+            }
+            """
+        )
+
     # ------------------------------------------------------------------
     # UI layout
     # ------------------------------------------------------------------
@@ -160,6 +234,11 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         main_layout = QtWidgets.QVBoxLayout(central)
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(8)
+
+        # Header
+        title_label = QtWidgets.QLabel("OBD-II Live Dashboard")
+        title_label.setObjectName("TitleLabel")
+        main_layout.addWidget(title_label)
 
         # --- Connection group ---
         conn_group = QtWidgets.QGroupBox("Connection")
@@ -188,6 +267,10 @@ class OBDMainWindow(QtWidgets.QMainWindow):
 
         self.status_label = QtWidgets.QLabel("Disconnected")
         conn_layout.addWidget(self.status_label)
+
+        self.vehicle_info_label = QtWidgets.QLabel("Vehicle info: —")
+        self.vehicle_info_label.setObjectName("VehicleInfoLabel")
+        conn_layout.addWidget(self.vehicle_info_label)
 
         # --- Live data & logging group ---
         live_group = QtWidgets.QGroupBox("Live Data & Logging")
@@ -353,7 +436,8 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         ax.cla()
         ax.set_facecolor("#202124")
         self.fig.patch.set_facecolor("#202124")
-        ax.tick_params(colors="#e8eaed")
+        ax.tick_params(colors="#e8eaed", labelsize=9)
+        ax.grid(True, color="#3c4043", linestyle="--", linewidth=0.7, alpha=0.7)
         for spine in ax.spines.values():
             spine.set_color("#e8eaed")
         if xlabel:
@@ -492,6 +576,9 @@ class OBDMainWindow(QtWidgets.QMainWindow):
         self.log("Connected to ECU.")
         self.status_label.setText(f"Connected ({port})")
 
+        vehicle_info = self._fetch_vehicle_details()
+        self.vehicle_info_label.setText(vehicle_info)
+
         self.connect_btn.setEnabled(False)
         self.disconnect_btn.setEnabled(True)
         self.start_btn.setEnabled(True)
@@ -508,6 +595,7 @@ class OBDMainWindow(QtWidgets.QMainWindow):
             self.connection = None
         self.status_label.setText("Disconnected")
         self.log("Disconnected from ECU.")
+        self.vehicle_info_label.setText("Vehicle info: —")
 
         self.connect_btn.setEnabled(True)
         self.disconnect_btn.setEnabled(False)
@@ -799,14 +887,64 @@ class OBDMainWindow(QtWidgets.QMainWindow):
 
                 if t and v:
                     color = next(color_cycle)
-                    ax.plot(t, v, linewidth=1.5, label=label, color=color)
+                    ax.plot(
+                        t,
+                        v,
+                        linewidth=2.0,
+                        label=label,
+                        color=color,
+                        marker="o",
+                        markersize=3,
+                        markerfacecolor="#121314",
+                        markeredgewidth=0.6,
+                    )
                     any_plotted = True
                     ax.set_ylabel(" / ".join(labels), color="#e8eaed")
 
             if any_plotted:
-                ax.legend(loc="upper left", fontsize=8, facecolor="#202124")
+                legend = ax.legend(
+                    loc="upper left",
+                    fontsize=8,
+                    facecolor="#202124",
+                    edgecolor="#3c4043",
+                    framealpha=0.9,
+                )
+                for text in legend.get_texts():
+                    text.set_color("#e8eaed")
 
         self.canvas.draw_idle()
+
+    def _fetch_vehicle_details(self) -> str:
+        if not self.connection or not self.connection.is_connected():
+            return "Vehicle info: —"
+
+        vin_text = None
+        protocol = getattr(self.connection, "protocol_name", None) or "Unknown protocol"
+        try:
+            vin_resp = self.connection.query(obd.commands.VIN)
+            if not vin_resp.is_null() and vin_resp.value:
+                vin_text = str(vin_resp.value)
+        except Exception:
+            vin_text = None
+
+        ecu_name = None
+        try:
+            ecu_resp = self.connection.query(obd.commands.ELM_VERSION)
+            if not ecu_resp.is_null() and ecu_resp.value:
+                ecu_name = str(ecu_resp.value)
+        except Exception:
+            ecu_name = None
+
+        parts = ["Vehicle info:"]
+        if vin_text:
+            parts.append(f"VIN {vin_text}")
+        if ecu_name:
+            parts.append(f"Interface {ecu_name}")
+        parts.append(protocol)
+
+        info = " | ".join(parts)
+        self.log(info)
+        return info
 
     # ------------------------------------------------------------------
     # Close event
